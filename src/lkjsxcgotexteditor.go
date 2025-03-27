@@ -77,6 +77,7 @@ type Editor struct {
 	showCursor    bool   // For cursor blinking
 	fd            int
 	origTerm      *termios
+	normalModeState string // State for normal mode commands, e.g., for 'dd'
 }
 
 // Supported modes.
@@ -96,6 +97,7 @@ func newEditor(fd int, origTerm *termios) *Editor {
 		showCursor: true,
 		fd:         fd,
 		origTerm:   origTerm,
+		normalModeState: "", // Initialize normalModeState
 	}
 }
 
@@ -176,6 +178,23 @@ func (e *Editor) moveCursorDown() {
 		}
 	}
 }
+
+// deleteLine deletes the current line.
+func (e *Editor) deleteLine() {
+	if len(e.document) > 1 {
+		e.document = append(e.document[:e.cy], e.document[e.cy+1:]...)
+		if e.cy > len(e.document)-1 {
+			e.cy = len(e.document) - 1
+		}
+		if e.cx > len(e.document[e.cy]) {
+			e.cx = len(e.document[e.cy])
+		}
+	} else {
+		e.document[0] = []rune{} // Clear the only line
+		e.cx = 0
+	}
+}
+
 
 // draw renders the document and a status bar.
 func (e *Editor) draw() {
@@ -276,16 +295,31 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 	case ':':
 		e.mode = ModeCommand
 		e.commandBuffer = ""
+		e.normalModeState = "" // Reset state when entering command mode
 	case 'h':
 		e.moveCursorLeft()
+		e.normalModeState = "" // Reset state after single char command
 	case 'j':
 		e.moveCursorDown()
+		e.normalModeState = "" // Reset state after single char command
 	case 'k':
 		e.moveCursorUp()
+		e.normalModeState = "" // Reset state after single char command
 	case 'l':
 		e.moveCursorRight()
+		e.normalModeState = "" // Reset state after single char command
 	case 'i':
 		e.mode = ModeInsert
+		e.normalModeState = "" // Reset state when entering insert mode
+	case 'd':
+		if e.normalModeState == "d" {
+			e.deleteLine()
+			e.normalModeState = "" // Reset state after 'dd'
+		} else {
+			e.normalModeState = "d" // Set state to wait for second 'd'
+		}
+	default:
+		e.normalModeState = "" // Reset state for other keys
 	}
 }
 
