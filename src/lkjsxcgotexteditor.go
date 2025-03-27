@@ -384,8 +384,18 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 		} else {
 			e.normalModeState = "d" // Set state to wait for second 'd'
 		}
-	default:
-		e.normalModeState = "" // Reset state for other keys
+	case 'g':
+		if e.normalModeState == "g" {
+			e.cy = 0                      // Move to top of document
+			e.cx = 0
+			e.normalModeState = ""      // Reset state after 'gg'
+		} else {
+			e.normalModeState = "g"      // Set state to wait for second 'g'
+		}
+	case 'G':
+		e.cy = len(e.document) - 1     // Move to bottom of document
+		e.cx = len(e.document[e.cy]) // Move to end of line
+		e.normalModeState = ""      // Reset state after 'G' command
 	case 'A':
 		e.cx = len(e.document[e.cy]) // Move cursor to end of line
 		e.mode = ModeInsert         // Enter insert mode
@@ -417,6 +427,8 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 	case 'J':
 		e.joinLines()
 		e.normalModeState = ""
+	default:
+		e.normalModeState = "" // Reset state for other keys
 	}
 }
 
