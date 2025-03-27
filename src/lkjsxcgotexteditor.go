@@ -33,7 +33,7 @@ func setTermios(fd int, t *termios) error {
 	return nil
 }
 
-// enableRawMode puts the terminal into raw mode.
+// enableRawMode puts the terminal into raw mode and returns the original settings.
 func enableRawMode(fd int) (*termios, error) {
 	orig, err := getTermios(fd)
 	if err != nil {
@@ -41,21 +41,21 @@ func enableRawMode(fd int) (*termios, error) {
 	}
 	raw := *orig
 
-	// Input modes: no break, no CR-to-NL, no parity check, no strip char, no start/stop control.
+	// Disable input modes: no break, no CR-to-NL, no parity check, no strip char, no start/stop control.
 	raw.Iflag &^= syscall.BRKINT | syscall.ICRNL | syscall.INPCK | syscall.ISTRIP | syscall.IXON
 
-	// Output modes: disable post processing.
+	// Disable output post processing.
 	raw.Oflag &^= syscall.OPOST
 
-	// Control modes: set 8-bit chars.
+	// Set control modes: 8-bit chars.
 	raw.Cflag |= syscall.CS8
 
-	// Local modes: echoing off, canonical off, no extended functions, no signal chars.
+	// Disable local modes: echo, canonical mode, extended functions and signal characters.
 	raw.Lflag &^= syscall.ECHO | syscall.ICANON | syscall.IEXTEN | syscall.ISIG
 
-	// Control characters: set read timeout.
-	raw.Cc[syscall.VMIN] = 0  // minimum characters for noncanonical read
-	raw.Cc[syscall.VTIME] = 1 // timeout in deciseconds
+	// Set read timeout: minimum characters and decisecond timeout.
+	raw.Cc[syscall.VMIN] = 0  // Minimum number of bytes
+	raw.Cc[syscall.VTIME] = 1 // Timeout (in deciseconds)
 
 	if err := setTermios(fd, &raw); err != nil {
 		return nil, err
@@ -63,52 +63,55 @@ func enableRawMode(fd int) (*termios, error) {
 	return orig, nil
 }
 
-// clearScreen uses ANSI escape sequences to clear the terminal.
+// clearScreen clears the terminal using ANSI escape sequences.
 func clearScreen() {
-	fmt.Print("\x1b[2J")
-	fmt.Print("\x1b[H")
+	fmt.Print("\x1b[2J\x1b[H")
 }
 
-// Editor represents the document, cursor position and current mode.
+// Editor represents the document, cursor state, and current mode.
 type Editor struct {
 	document      [][]rune
-	cx, cy        int    // cursor position: column and row
+	cx, cy        int    // Cursor position (column, row)
 	mode          string // "NORMAL", "INSERT", or "COMMAND"
-	commandBuffer string // holds the command when in command mode
-	showCursor    bool
+	commandBuffer string // Command buffer when in command mode
+	showCursor    bool   // For cursor blinking
+	fd            int
+	origTerm      *termios
 }
 
-// Modes.
+// Supported modes.
 const (
 	ModeNormal  = "NORMAL"
 	ModeInsert  = "INSERT"
 	ModeCommand = "COMMAND"
 )
 
-// newEditor creates an editor with one empty line in Normal mode.
-func newEditor() *Editor {
+// newEditor initializes the editor with an empty document in Normal mode.
+func newEditor(fd int, origTerm *termios) *Editor {
 	return &Editor{
 		document:   [][]rune{[]rune{}},
 		cx:         0,
 		cy:         0,
 		mode:       ModeNormal,
 		showCursor: true,
+		fd:         fd,
+		origTerm:   origTerm,
 	}
 }
 
-// insertChar inserts a rune at the current cursor position.
+// insertChar inserts a character at the current cursor position.
 func (e *Editor) insertChar(r rune) {
 	line := e.document[e.cy]
 	if e.cx > len(line) {
 		e.cx = len(line)
 	}
-	// Insert the rune at the cursor.
+	// Insert the rune.
 	newLine := append(line[:e.cx], append([]rune{r}, line[e.cx:]...)...)
 	e.document[e.cy] = newLine
 	e.cx++
 }
 
-// backspace removes a character to the left of the cursor.
+// backspace removes a character before the cursor.
 func (e *Editor) backspace() {
 	if e.cx > 0 {
 		line := e.document[e.cy]
@@ -125,18 +128,18 @@ func (e *Editor) backspace() {
 	}
 }
 
-// insertNewline splits the current line at the cursor position.
+// insertNewline splits the current line at the cursor.
 func (e *Editor) insertNewline() {
 	line := e.document[e.cy]
 	newLine := append([]rune{}, line[e.cx:]...)
 	e.document[e.cy] = line[:e.cx]
-	// Insert new line below.
+	// Insert a new line below.
 	e.document = append(e.document[:e.cy+1], append([][]rune{newLine}, e.document[e.cy+1:]...)...)
 	e.cy++
 	e.cx = 0
 }
 
-// moveCursorLeft moves the cursor left (or to previous line if at beginning).
+// Cursor movement functions.
 func (e *Editor) moveCursorLeft() {
 	if e.cx > 0 {
 		e.cx--
@@ -146,7 +149,6 @@ func (e *Editor) moveCursorLeft() {
 	}
 }
 
-// moveCursorRight moves the cursor right (or to next line if at end).
 func (e *Editor) moveCursorRight() {
 	lineLen := len(e.document[e.cy])
 	if e.cx < lineLen {
@@ -157,7 +159,6 @@ func (e *Editor) moveCursorRight() {
 	}
 }
 
-// moveCursorUp moves the cursor up.
 func (e *Editor) moveCursorUp() {
 	if e.cy > 0 {
 		e.cy--
@@ -167,7 +168,6 @@ func (e *Editor) moveCursorUp() {
 	}
 }
 
-// moveCursorDown moves the cursor down.
 func (e *Editor) moveCursorDown() {
 	if e.cy < len(e.document)-1 {
 		e.cy++
@@ -177,28 +177,25 @@ func (e *Editor) moveCursorDown() {
 	}
 }
 
-// draw renders the document along with a status bar (or command line) showing mode and cursor info.
+// draw renders the document and a status bar.
 func (e *Editor) draw() {
 	clearScreen()
-	// Draw document lines.
+	// Render document lines.
 	for _, line := range e.document {
 		fmt.Println(string(line))
+		fmt.Print("\r")
 	}
-	// Draw status bar or command prompt.
+	// Draw status or command bar with inverted colors.
+	fmt.Print("\x1b[7m")
 	if e.mode == ModeCommand {
-		// Show command prompt at the bottom.
-		fmt.Print("\x1b[7m")
-		cmdLine := fmt.Sprintf(":%s", e.commandBuffer)
-		fmt.Print(cmdLine)
-		fmt.Print("\x1b[K")
+		fmt.Printf(":%s", e.commandBuffer)
 	} else {
-		// Show normal status bar.
-		fmt.Print("\x1b[7m")
 		status := fmt.Sprintf(" %s | Ln %d, Col %d ", e.mode, e.cy+1, e.cx+1)
 		fmt.Print(status)
-		fmt.Print("\x1b[K")
 	}
+	fmt.Print("\x1b[K")
 	fmt.Print("\x1b[0m\r\n")
+
 	// Position the cursor.
 	if e.mode == ModeCommand {
 		// Cursor at the end of the command prompt.
@@ -208,13 +205,14 @@ func (e *Editor) draw() {
 	}
 }
 
-// saveFile writes the document to a file.
+// saveFile writes the document content to a file.
 func (e *Editor) saveFile(filename string) error {
 	f, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
 	for i, line := range e.document {
 		_, err := f.WriteString(string(line))
 		if err != nil {
@@ -230,40 +228,35 @@ func (e *Editor) saveFile(filename string) error {
 	return nil
 }
 
-// processCommand processes the completed command entered in command mode.
-func (e *Editor) processCommand(fd int, orig *termios) {
+// processCommand interprets and executes a completed command.
+func (e *Editor) processCommand() {
 	cmd := e.commandBuffer
-	// Reset command buffer and return to normal mode.
 	e.commandBuffer = ""
 	e.mode = ModeNormal
 
-	// Process known commands.
 	switch cmd {
 	case "q":
-		setTermios(fd, orig)
+		setTermios(e.fd, e.origTerm)
 		os.Exit(0)
 	case "w":
 		if err := e.saveFile("output.txt"); err != nil {
-			// Optionally, display an error message in status bar.
+			// Optionally display an error message on the status bar.
 		}
 	case "wq":
 		if err := e.saveFile("output.txt"); err != nil {
-			// Optionally, display an error message in status bar.
+			// Optionally display an error message on the status bar.
 			return
 		}
-		setTermios(fd, orig)
+		setTermios(e.fd, e.origTerm)
 		os.Exit(0)
 	}
 }
 
-// processNormalInput handles keystrokes in Normal mode.
-func (e *Editor) processNormalInput(b byte, inputCh chan byte, fd int, orig *termios) {
-	// Handle escape sequences (arrow keys).
+// processNormalInput handles input in Normal mode.
+func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
+	// Handle escape sequences for arrow keys.
 	if b == 27 {
-		seq := make([]byte, 3)
-		seq[0] = b
-		seq[1] = <-inputCh
-		seq[2] = <-inputCh
+		seq := []byte{b, <-inputCh, <-inputCh}
 		if seq[1] == '[' {
 			switch seq[2] {
 			case 'A': // Up arrow.
@@ -281,7 +274,6 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte, fd int, orig *ter
 
 	switch b {
 	case ':':
-		// Enter command mode.
 		e.mode = ModeCommand
 		e.commandBuffer = ""
 	case 'h':
@@ -292,14 +284,14 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte, fd int, orig *ter
 		e.moveCursorUp()
 	case 'l':
 		e.moveCursorRight()
-	case 'i': // Enter Insert mode.
+	case 'i':
 		e.mode = ModeInsert
 	}
 }
 
-// processInsertInput handles keystrokes in Insert mode.
-func (e *Editor) processInsertInput(b byte, inputCh chan byte, fd int, orig *termios) {
-	// Exit insert mode with Esc.
+// processInsertInput handles input in Insert mode.
+func (e *Editor) processInsertInput(b byte) {
+	// Exit Insert mode with Esc.
 	if b == 27 {
 		e.mode = ModeNormal
 		return
@@ -308,44 +300,83 @@ func (e *Editor) processInsertInput(b byte, inputCh chan byte, fd int, orig *ter
 	switch b {
 	case 127, 8: // Backspace.
 		e.backspace()
-	case '\r', '\n': // Enter.
+	case '\r', '\n': // Newline.
 		e.insertNewline()
 	default:
-		// Only add printable characters.
 		if b >= 32 && b < 127 {
 			e.insertChar(rune(b))
 		}
 	}
 }
 
-// processCommandInput handles keystrokes in Command mode.
-func (e *Editor) processCommandInput(b byte, inputCh chan byte, fd int, orig *termios) {
+// processCommandInput handles input in Command mode.
+func (e *Editor) processCommandInput(b byte) {
 	switch b {
 	case '\r', '\n':
-		// Process the command.
-		e.processCommand(fd, orig)
+		e.processCommand()
 	case 127, 8: // Backspace.
 		if len(e.commandBuffer) > 0 {
 			e.commandBuffer = e.commandBuffer[:len(e.commandBuffer)-1]
 		}
 	default:
-		// Append only printable characters.
 		if b >= 32 && b < 127 {
 			e.commandBuffer += string(b)
 		}
 	}
 }
 
-// processInput dispatches the input based on the current mode.
-func (e *Editor) processInput(b byte, inputCh chan byte, fd int, orig *termios) {
+// processInput routes the input to the correct handler based on mode.
+func (e *Editor) processInput(b byte, inputCh chan byte) {
 	switch e.mode {
 	case ModeNormal:
-		e.processNormalInput(b, inputCh, fd, orig)
+		e.processNormalInput(b, inputCh)
 	case ModeInsert:
-		e.processInsertInput(b, inputCh, fd, orig)
+		e.processInsertInput(b)
 	case ModeCommand:
-		e.processCommandInput(b, inputCh, fd, orig)
+		e.processCommandInput(b)
 	}
+}
+
+// Run starts the main input loop and refreshes the screen periodically.
+func (e *Editor) Run(inputCh chan byte) {
+	// Use a ticker to periodically refresh the screen (simulate cursor blinking).
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	e.draw() // Initial draw.
+
+	for {
+		select {
+		case b := <-inputCh:
+			e.processInput(b, inputCh)
+			e.draw()
+		case <-ticker.C:
+			e.showCursor = !e.showCursor
+			e.draw()
+		}
+	}
+}
+
+// readInput continuously reads from os.Stdin and sends bytes to inputCh.
+func readInput(inputCh chan byte) {
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err == nil && n == 1 {
+			inputCh <- buf[0]
+		}
+	}
+}
+
+// setupSignalHandler ensures the terminal settings are restored on exit signals.
+func setupSignalHandler(fd int, orig *termios) {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		setTermios(fd, orig)
+		os.Exit(0)
+	}()
 }
 
 func main() {
@@ -355,44 +386,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error enabling raw mode: %v\n", err)
 		os.Exit(1)
 	}
+	// Ensure terminal is restored on exit.
 	defer setTermios(fd, origTerm)
+	setupSignalHandler(fd, origTerm)
 
-	// Ensure that the terminal is restored on interrupt.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
-	go func() {
-		<-sigCh
-		setTermios(fd, origTerm)
-		os.Exit(0)
-	}()
-
-	editor := newEditor()
+	editor := newEditor(fd, origTerm)
 	inputCh := make(chan byte)
 
-	// Goroutine to continuously read from stdin.
-	go func() {
-		buf := make([]byte, 1)
-		for {
-			n, err := os.Stdin.Read(buf)
-			if err == nil && n == 1 {
-				inputCh <- buf[0]
-			}
-		}
-	}()
+	// Start the input reader goroutine.
+	go readInput(inputCh)
 
-	// Ticker for asynchronous screen refresh.
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case b := <-inputCh:
-			editor.processInput(b, inputCh, fd, origTerm)
-			editor.draw()
-		case <-ticker.C:
-			// Toggle cursor flash or simply refresh the screen.
-			editor.showCursor = !editor.showCursor
-			editor.draw()
-		}
-	}
+	// Run the editor main loop.
+	editor.Run(inputCh)
 }
