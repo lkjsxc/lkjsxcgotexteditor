@@ -195,6 +195,89 @@ func (e *Editor) deleteLine() {
 	}
 }
 
+// moveCursorToNextWord moves the cursor to the start of the next word.
+func (e *Editor) moveCursorToNextWord() {
+	line := e.document[e.cy]
+	if e.cx < len(line) {
+		e.cx++ // Skip current char to avoid infinite loop
+	}
+	for e.cx < len(line) && line[e.cx] == ' ' {
+		e.cx++
+	}
+	for e.cx < len(line) && line[e.cx] != ' ' {
+		e.cx++
+	}
+	if e.cx > len(line) {
+		e.cx = len(line)
+	}
+}
+
+// moveCursorToPrevWord moves the cursor to the start of the previous word.
+func (e *Editor) moveCursorToPrevWord() {
+	if e.cx > 0 {
+		e.cx-- // Move once to ensure we are not on a word boundary
+	}
+	for e.cx > 0 && e.document[e.cy][e.cx] == ' ' {
+		e.cx--
+	}
+	for e.cx > 0 && e.document[e.cy][e.cx] != ' ' {
+		e.cx--
+	}
+	if e.cx > 0 && e.document[e.cy][e.cx] != ' ' {
+		e.cx++ // Move to the start of the word
+	}
+}
+
+// moveCursorToEndOfWord moves the cursor to the end of the current word.
+func (e *Editor) moveCursorToEndOfWord() {
+	line := e.document[e.cy]
+	for e.cx < len(line) && line[e.cx] != ' ' {
+		e.cx++
+	}
+}
+
+// moveCursorToLineStart moves the cursor to the beginning of the line.
+func (e *Editor) moveCursorToLineStart() {
+	e.cx = 0
+}
+
+// moveCursorToLineEnd moves the cursor to the end of the line.
+func (e *Editor) moveCursorToLineEnd() {
+	e.cx = len(e.document[e.cy])
+}
+
+// deleteChar deletes the character at the cursor position.
+func (e *Editor) deleteChar() {
+	if e.cx < len(e.document[e.cy]) {
+		line := e.document[e.cy]
+		e.document[e.cy] = append(line[:e.cx], line[e.cx+1:]...)
+	}
+}
+
+// insertLineBelowAndEnterInsertMode inserts a new line below and enters insert mode.
+func (e *Editor) insertLineBelowAndEnterInsertMode() {
+	e.insertNewline()
+	e.mode = ModeInsert
+}
+
+// insertLineAboveAndEnterInsertMode inserts a new line above and enters insert mode.
+func (e *Editor) insertLineAboveAndEnterInsertMode() {
+	line := e.document[e.cy]
+	e.document = append(e.document[:e.cy], append([][]rune{[]rune{}}, e.document[e.cy:]...)...)
+	e.document[e.cy+1] = line
+	e.mode = ModeInsert
+}
+
+// joinLines joins the current line with the next line.
+func (e *Editor) joinLines() {
+	if e.cy < len(e.document)-1 {
+		currentLine := e.document[e.cy]
+		nextLine := e.document[e.cy+1]
+		e.document[e.cy] = append(currentLine, nextLine...)
+		e.document = append(e.document[:e.cy+1], e.document[e.cy+2:]...)
+	}
+}
+
 
 // draw renders the document and a status bar.
 func (e *Editor) draw() {
@@ -303,6 +386,37 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 		}
 	default:
 		e.normalModeState = "" // Reset state for other keys
+	case 'A':
+		e.cx = len(e.document[e.cy]) // Move cursor to end of line
+		e.mode = ModeInsert         // Enter insert mode
+		e.normalModeState = ""      // Reset state after 'A' command
+	case 'w':
+		e.moveCursorToNextWord()
+		e.normalModeState = ""
+	case 'b':
+		e.moveCursorToPrevWord()
+		e.normalModeState = ""
+	case 'e':
+		e.moveCursorToEndOfWord()
+		e.normalModeState = ""
+	case '0':
+		e.moveCursorToLineStart()
+		e.normalModeState = ""
+	case '$':
+		e.moveCursorToLineEnd()
+		e.normalModeState = ""
+	case 'x':
+		e.deleteChar()
+		e.normalModeState = ""
+	case 'o':
+		e.insertLineBelowAndEnterInsertMode()
+		e.normalModeState = ""
+	case 'O':
+		e.insertLineAboveAndEnterInsertMode()
+		e.normalModeState = ""
+	case 'J':
+		e.joinLines()
+		e.normalModeState = ""
 	}
 }
 
