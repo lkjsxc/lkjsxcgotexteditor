@@ -18,7 +18,7 @@ func getTermios(fd int) (*termios, error) {
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd),
 		uintptr(syscall.TCGETS), uintptr(unsafe.Pointer(&t)), 0, 0, 0)
 	if errno != 0 {
-		return nil, errno
+		return nil, os.NewSyscallError("ioctl TCGETS", errno)
 	}
 	return &t, nil
 }
@@ -28,7 +28,7 @@ func setTermios(fd int, t *termios) error {
 	_, _, errno := syscall.Syscall6(syscall.SYS_IOCTL, uintptr(fd),
 		uintptr(syscall.TCSETS), uintptr(unsafe.Pointer(t)), 0, 0, 0)
 	if errno != 0 {
-		return errno
+		return os.NewSyscallError("ioctl TCSETS", errno)
 	}
 	return nil
 }
@@ -37,7 +37,7 @@ func setTermios(fd int, t *termios) error {
 func enableRawMode(fd int) (*termios, error) {
 	orig, err := getTermios(fd)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("getTermios: %w", err)
 	}
 	raw := *orig
 
@@ -74,7 +74,6 @@ type Editor struct {
 	cx, cy        int    // Cursor position (column, row)
 	mode          string // "NORMAL", "INSERT", or "COMMAND"
 	commandBuffer string // Command buffer when in command mode
-	showCursor    bool   // For cursor blinking
 	fd            int
 	origTerm      *termios
 	normalModeState string // State for normal mode commands, e.g., for 'dd'
@@ -105,7 +104,6 @@ func newEditor(fd int, origTerm *termios) *Editor {
 		cx:         0,
 		cy:         0,
 		mode:       ModeNormal,
-		showCursor: true,
 		fd:         fd,
 		origTerm:   origTerm,
 		normalModeState: "", // Initialize normalModeState
@@ -353,12 +351,21 @@ func (e *Editor) joinLines() {
 
 
 // draw renders the document and a status bar.
-func (e *Editor) draw() {
+func (e *Editor) draw(showCursor bool) {
 	clearScreen()
 	// Render document lines.
-	for _, line := range e.document {
-		fmt.Println(string(line))
-		fmt.Print("\r")
+	for y, line := range e.document {
+		for x, r := range line {
+			if showCursor && y == e.cy && x == e.cx && e.mode != ModeCommand {
+				// Invert colors for cursor
+				fmt.Print("\x1b[7m")
+				fmt.Print(string(r))
+				fmt.Print("\x1b[0m")
+			} else {
+				fmt.Print(string(r))
+			}
+		}
+		fmt.Println("\r")
 	}
 	// Draw status or command bar with inverted colors.
 	fmt.Print("\x1b[7m")
@@ -372,11 +379,13 @@ func (e *Editor) draw() {
 	fmt.Print("\x1b[0m\r\n")
 
 	// Position the cursor.
-	if e.mode == ModeCommand {
-		// Cursor at the end of the command prompt.
-		fmt.Printf("\x1b[%d;%dH", len(e.document)+1, len(e.commandBuffer)+2)
-	} else {
-		fmt.Printf("\x1b[%d;%dH", e.cy+1, e.cx+1)
+	if showCursor {
+		if e.mode == ModeCommand {
+			// Cursor at the end of the command prompt.
+			fmt.Printf("\x1b[%d;%dH", len(e.document)+1, len(e.commandBuffer)+2)
+		} else {
+			fmt.Printf("\x1b[%d;%dH", e.cy+1, e.cx+1)
+		}
 	}
 }
 
@@ -384,19 +393,19 @@ func (e *Editor) draw() {
 func (e *Editor) saveFile(filename string) error {
 	f, err := os.Create(filename)
 	if err != nil {
-		return err
+		return fmt.Errorf("os.Create: %w", err)
 	}
 	defer f.Close()
 
 	for i, line := range e.document {
 		_, err := f.WriteString(string(line))
 		if err != nil {
-			return err
+			return fmt.Errorf("WriteString: %w", err)
 		}
 		if i < len(e.document)-1 {
 			_, err = f.WriteString("\n")
 			if err != nil {
-				return err
+				return fmt.Errorf("WriteString newline: %w", err)
 			}
 		}
 	}
@@ -431,33 +440,73 @@ func (e *Editor) processCommand() {
 func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 
 	switch b {
+	// Command mode
 	case ':':
 		e.mode = ModeCommand
 		e.commandBuffer = ""
 		e.normalModeState = "" // Reset state when entering command mode
-	case 'h':
+
+	// Cursor movement
+	case 'h': // left
 		e.moveCursorLeft()
 		e.normalModeState = "" // Reset state after single char command
-	case 'j':
+	case 'j': // down
 		e.moveCursorDown()
 		e.normalModeState = "" // Reset state after single char command
-	case 'k':
+	case 'k': // up
 		e.moveCursorUp()
 		e.normalModeState = "" // Reset state after single char command
-	case 'l':
+	case 'l': // right
 		e.moveCursorRight()
 		e.normalModeState = "" // Reset state after single char command
-	case 'i':
+	case 'w': // next word
+		e.moveCursorToNextWord()
+		e.normalModeState = ""
+	case 'b': // prev word
+		e.moveCursorToPrevWord()
+		e.normalModeState = ""
+	case 'e': // end of word
+		e.moveCursorToEndOfWord()
+		e.normalModeState = ""
+	case '0': // line start
+		e.moveCursorToLineStart()
+		e.normalModeState = ""
+	case '$': // line end
+		e.moveCursorToLineEnd()
+		e.normalModeState = ""
+
+	// Mode change
+	case 'i': // insert mode
 		e.mode = ModeInsert
 		e.normalModeState = "" // Reset state when entering insert mode
-	case 'd':
+	case 'A': // append to line end and enter insert mode
+		e.cx = len(e.document[e.cy]) // Move cursor to end of line
+		e.mode = ModeInsert         // Enter insert mode
+		e.normalModeState = ""      // Reset state after 'A' command
+	case 'o': // insert line below and enter insert mode
+		e.insertLineBelowAndEnterInsertMode()
+		e.normalModeState = ""
+	case 'O': // insert line above and enter insert mode
+		e.insertLineAboveAndEnterInsertMode()
+		e.normalModeState = ""
+
+	// Editing operations
+	case 'd': // delete line or char
 		if e.normalModeState == "d" {
 			e.deleteLine()
 			e.normalModeState = "" // Reset state after 'dd'
 		} else {
 			e.normalModeState = "d" // Set state to wait for second 'd'
 		}
-	case 'g':
+	case 'x': // delete char at cursor
+		e.deleteChar()
+		e.normalModeState = ""
+	case 'J': // join lines
+		e.joinLines()
+		e.normalModeState = ""
+
+	// Document navigation
+	case 'g': // goto top of document
 		if e.normalModeState == "g" {
 			e.cy = 0                      // Move to top of document
 			e.cx = 0
@@ -465,47 +514,19 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 		} else {
 			e.normalModeState = "g"      // Set state to wait for second 'g'
 		}
-	case 'G':
+	case 'G': // goto bottom of document
 		e.cy = len(e.document) - 1     // Move to bottom of document
 		e.cx = len(e.document[e.cy]) // Move to end of line
 		e.normalModeState = ""      // Reset state after 'G' command
-	case 'A':
-		e.cx = len(e.document[e.cy]) // Move cursor to end of line
-		e.mode = ModeInsert         // Enter insert mode
-		e.normalModeState = ""      // Reset state after 'A' command
-	case 'w':
-		e.moveCursorToNextWord()
-		e.normalModeState = ""
-	case 'b':
-		e.moveCursorToPrevWord()
-		e.normalModeState = ""
-	case 'e':
-		e.moveCursorToEndOfWord()
-		e.normalModeState = ""
-	case '0':
-		e.moveCursorToLineStart()
-		e.normalModeState = ""
-	case '$':
-		e.moveCursorToLineEnd()
-		e.normalModeState = ""
-	case 'x':
-		e.deleteChar()
-		e.normalModeState = ""
-	case 'o':
-		e.insertLineBelowAndEnterInsertMode()
-		e.normalModeState = ""
-	case 'O':
-		e.insertLineAboveAndEnterInsertMode()
-		e.normalModeState = ""
-	case 'J':
-		e.joinLines()
-		e.normalModeState = ""
-	case 'u':
+
+	// Undo/Redo
+	case 'u': // undo
 		e.undo()
 		e.normalModeState = ""
-	case 'r':
+	case 'r': // redo
 		e.redo()
 		e.normalModeState = ""
+
 	default:
 		e.normalModeState = "" // Reset state for other keys
 	}
@@ -514,17 +535,17 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 // processInsertInput handles input in Insert mode.
 func (e *Editor) processInsertInput(b byte) {
 	// Exit Insert mode with Esc.
-	if b == 27 {
+	if b == 27 { // ESC
 		e.mode = ModeNormal
 		return
 	}
 
 	switch b {
-	case 127, 8: // Backspace.
+	case 127, 8: // Backspace (DEL or Ctrl+H)
 		e.backspace()
-	case '\r', '\n': // Newline.
+	case '\r', '\n': // Newline (Enter)
 		e.insertNewline()
-	default:
+	default: // Insertable characters
 		if b >= 32 && b < 127 {
 			e.insertChar(rune(b))
 		}
@@ -534,13 +555,13 @@ func (e *Editor) processInsertInput(b byte) {
 // processCommandInput handles input in Command mode.
 func (e *Editor) processCommandInput(b byte) {
 	switch b {
-	case '\r', '\n':
+	case '\r', '\n': // Enter - execute command
 		e.processCommand()
-	case 127, 8: // Backspace.
+	case 127, 8: // Backspace
 		if len(e.commandBuffer) > 0 {
 			e.commandBuffer = e.commandBuffer[:len(e.commandBuffer)-1]
 		}
-	default:
+	default: // Command characters
 		if b >= 32 && b < 127 {
 			e.commandBuffer += string(b)
 		}
@@ -556,6 +577,9 @@ func (e *Editor) processInput(b byte, inputCh chan byte) {
 		e.processInsertInput(b)
 	case ModeCommand:
 		e.processCommandInput(b)
+	default:
+		// Should not happen, but handle unknown mode just in case.
+		fmt.Fprintf(os.Stderr, "Unknown mode: %s\n", e.mode)
 	}
 }
 
@@ -565,16 +589,18 @@ func (e *Editor) Run(inputCh chan byte) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	e.draw() // Initial draw.
+	var showCursor bool // Cursor blinking state
+
+	e.draw(showCursor) // Initial draw.
 
 	for {
 		select {
 		case b := <-inputCh:
 			e.processInput(b, inputCh)
-			e.draw()
+			e.draw(false) // Cursor is always shown when typing
 		case <-ticker.C:
-			e.showCursor = !e.showCursor
-			e.draw()
+			showCursor = !showCursor
+			e.draw(showCursor) // Toggle cursor visibility on ticker
 		}
 	}
 }
@@ -605,7 +631,7 @@ func main() {
 	fd := int(os.Stdin.Fd())
 	origTerm, err := enableRawMode(fd)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error enabling raw mode: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error enabling raw mode: %+v\n", err)
 		os.Exit(1)
 	}
 	// Ensure terminal is restored on exit.
