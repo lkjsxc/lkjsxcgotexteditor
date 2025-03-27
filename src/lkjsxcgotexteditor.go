@@ -273,23 +273,6 @@ func (e *Editor) processCommand() {
 
 // processNormalInput handles input in Normal mode.
 func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
-	// Handle escape sequences for arrow keys.
-	if b == 27 {
-		seq := []byte{b, <-inputCh, <-inputCh}
-		if seq[1] == '[' {
-			switch seq[2] {
-			case 'A': // Up arrow.
-				e.moveCursorUp()
-			case 'B': // Down arrow.
-				e.moveCursorDown()
-			case 'C': // Right arrow.
-				e.moveCursorRight()
-			case 'D': // Left arrow.
-				e.moveCursorLeft()
-			}
-		}
-		return
-	}
 
 	switch b {
 	case ':':
