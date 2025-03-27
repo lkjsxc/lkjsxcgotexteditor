@@ -78,6 +78,17 @@ type Editor struct {
 	fd            int
 	origTerm      *termios
 	normalModeState string // State for normal mode commands, e.g., for 'dd'
+	history       []EditorState
+	historyIndex  int
+}
+
+// EditorState represents the state of the editor for history.
+type EditorState struct {
+	document      [][]rune
+	cx, cy        int
+	mode          string
+	commandBuffer string
+	normalModeState string
 }
 
 // Supported modes.
@@ -98,11 +109,41 @@ func newEditor(fd int, origTerm *termios) *Editor {
 		fd:         fd,
 		origTerm:   origTerm,
 		normalModeState: "", // Initialize normalModeState
+		history:      []EditorState{},
+		historyIndex: 0,
 	}
+}
+
+// recordHistory saves the current editor state to the history stack.
+func (e *Editor) recordHistory() {
+	if e.historyIndex < len(e.history) {
+		e.history = e.history[:e.historyIndex] // Truncate history after current index
+	}
+	currentState := EditorState{
+		document:      e.cloneDocument(),
+		cx:            e.cx,
+		cy:            e.cy,
+		mode:          e.mode,
+		commandBuffer: e.commandBuffer,
+		normalModeState: e.normalModeState,
+	}
+	e.history = append(e.history, currentState)
+	e.historyIndex++
+}
+
+// cloneDocument creates a deep copy of the document.
+func (e *Editor) cloneDocument() [][]rune {
+	docClone := make([][]rune, len(e.document))
+	for i, line := range e.document {
+		docClone[i] = make([]rune, len(line))
+		copy(docClone[i], line)
+	}
+	return docClone
 }
 
 // insertChar inserts a character at the current cursor position.
 func (e *Editor) insertChar(r rune) {
+	e.recordHistory()
 	line := e.document[e.cy]
 	if e.cx > len(line) {
 		e.cx = len(line)
@@ -115,6 +156,7 @@ func (e *Editor) insertChar(r rune) {
 
 // backspace removes a character before the cursor.
 func (e *Editor) backspace() {
+	e.recordHistory()
 	if e.cx > 0 {
 		line := e.document[e.cy]
 		e.document[e.cy] = append(line[:e.cx-1], line[e.cx:]...)
@@ -132,6 +174,7 @@ func (e *Editor) backspace() {
 
 // insertNewline splits the current line at the cursor.
 func (e *Editor) insertNewline() {
+	e.recordHistory()
 	line := e.document[e.cy]
 	newLine := append([]rune{}, line[e.cx:]...)
 	e.document[e.cy] = line[:e.cx]
@@ -181,6 +224,7 @@ func (e *Editor) moveCursorDown() {
 
 // deleteLine deletes the current line.
 func (e *Editor) deleteLine() {
+	e.recordHistory()
 	if len(e.document) > 1 {
 		e.document = append(e.document[:e.cy], e.document[e.cy+1:]...)
 		if e.cy > len(e.document)-1 {
@@ -248,6 +292,7 @@ func (e *Editor) moveCursorToLineEnd() {
 
 // deleteChar deletes the character at the cursor position.
 func (e *Editor) deleteChar() {
+	e.recordHistory()
 	if e.cx < len(e.document[e.cy]) {
 		line := e.document[e.cy]
 		e.document[e.cy] = append(line[:e.cx], line[e.cx+1:]...)
@@ -266,6 +311,34 @@ func (e *Editor) insertLineAboveAndEnterInsertMode() {
 	e.document = append(e.document[:e.cy], append([][]rune{[]rune{}}, e.document[e.cy:]...)...)
 	e.document[e.cy+1] = line
 	e.mode = ModeInsert
+}
+
+// undo reverts the editor state to the previous history state.
+func (e *Editor) undo() {
+	if e.historyIndex > 1 {
+		e.historyIndex--
+		prevState := e.history[e.historyIndex-1]
+		e.document = prevState.document
+		e.cx = prevState.cx
+		e.cy = prevState.cy
+		// e.mode = prevState.mode
+		e.commandBuffer = prevState.commandBuffer
+		e.normalModeState = prevState.normalModeState
+	}
+}
+
+// redo applies the next history state if available.
+func (e *Editor) redo() {
+	if e.historyIndex < len(e.history) {
+		e.historyIndex++
+		nextState := e.history[e.historyIndex-1]
+		e.document = nextState.document
+		e.cx = nextState.cx
+		e.cy = nextState.cy
+		// e.mode = nextState.mode
+		e.commandBuffer = nextState.commandBuffer
+		e.normalModeState = nextState.normalModeState
+	}
 }
 
 // joinLines joins the current line with the next line.
@@ -426,6 +499,12 @@ func (e *Editor) processNormalInput(b byte, inputCh chan byte) {
 		e.normalModeState = ""
 	case 'J':
 		e.joinLines()
+		e.normalModeState = ""
+	case 'u':
+		e.undo()
+		e.normalModeState = ""
+	case 'r':
+		e.redo()
 		e.normalModeState = ""
 	default:
 		e.normalModeState = "" // Reset state for other keys
