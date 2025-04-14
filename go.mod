@@ -1,3 +1,3 @@
-module lkjsxcgotexteditor
+module lkjsxcgoeditor
 
-go 1.23.7
+go 1.20
